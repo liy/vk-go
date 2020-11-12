@@ -13,6 +13,12 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// Message format from client
+type ClientMessage struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 func main() {
 	// TODO: do we need this?
 	kconn, err := kafka.Dial("tcp", "localhost:9092")
@@ -124,12 +130,8 @@ func main() {
 		}
 	})
 
-	type Action struct {
-		Key  int    `json:"key"`
-		Data string `json:"data"`
-	}
-
-	router.HandleFunc("/open/{topic}", func(res http.ResponseWriter, req *http.Request) {
+	// Open a topic, subscribe the changes and also be able to write to the topic
+	router.HandleFunc("/open-topic/{topic}", func(res http.ResponseWriter, req *http.Request) {
 		var upgrader = websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -143,24 +145,42 @@ func main() {
 		// To inform other goroutine that socket has closed, stop working.
 		closeSocket := make(chan bool)
 
+		w := kafka.NewWriter(kafka.WriterConfig{
+			Brokers:  []string{"localhost:9092"},
+			Topic:    vars["topic"],
+			Balancer: &kafka.Hash{},
+		})
+
 		// Handle client to server actions
 		go func() {
-			var action Action
+
+			var clientMessages []ClientMessage
 			for {
-				err := conn.ReadJSON(&action)
+				err := conn.ReadJSON(&clientMessages)
 				if err != nil {
-					fmt.Println("Session closed")
-					// Socket close,
+					fmt.Println(err)
+					// FIXME: better handle the invalid json.
 					closeSocket <- true
-					return
+					continue
 				}
 
-				// TODO: Handle client data
-				fmt.Println(action)
+				messages := make([]kafka.Message, len(clientMessages))
+				for i, v := range clientMessages {
+					messages[i] = kafka.Message{
+						Key:   []byte(v.Key),
+						Value: []byte(v.Value),
+					}
+				}
+
+				// Write message to topic
+				err = w.WriteMessages(req.Context(), messages...)
+				if err != nil {
+					fmt.Println("Error writing message")
+				}
 			}
 		}()
 
-		// handle server to client subscribed messages
+		// Handle server to client subscribed messages
 		partitions, err := kconn.ReadPartitions()
 		messageChan := make(chan []byte, len(partitions))
 		// partition, err := strconv.ParseUint(vars["partition"], 10, 32)
